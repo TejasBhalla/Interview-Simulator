@@ -1,4 +1,5 @@
 import { supabase } from "../config/supabaseClient.js"
+import { generateAnswerExplanation } from "../services/pythonService.js"
 
 const toReliableMillis = (value) => {
   if (!value) return NaN
@@ -17,28 +18,22 @@ const toReliableMillis = (value) => {
     return Date.parse(normalized)
   }
 
-  const asLocal = Date.parse(normalized)
-  const asUtc = Date.parse(`${normalized}Z`)
-
-  if (Number.isFinite(asLocal) && Number.isFinite(asUtc)) {
-    // Choose the later interpretation to avoid false "expired" due to timezone ambiguity.
-    return Math.max(asLocal, asUtc)
-  }
-
-  return Number.isFinite(asLocal) ? asLocal : asUtc
+  return Date.parse(normalized)
 }
+
+const normalizeText = (value) => String(value ?? "").trim().toLowerCase()
 
 const normalizeAnswers = (answers) => {
   const normalized = {
     byId: {},
     byQuestion: {},
-    byIndex: {}
+    byIndex: {},
   }
-
-  if (!answers) return normalized
 
   if (Array.isArray(answers)) {
     answers.forEach((item, idx) => {
+      if (!item || typeof item !== "object") return
+
       const key = item?.question_id ?? item?.questionId ?? item?.id
       const questionText = item?.question ?? item?.question_text
       const value = item?.answer ?? item?.selected_option ?? item?.selectedAnswer
@@ -59,7 +54,7 @@ const normalizeAnswers = (answers) => {
     return normalized
   }
 
-  if (typeof answers === "object") {
+  if (answers && typeof answers === "object") {
     Object.entries(answers).forEach(([key, value]) => {
       normalized.byId[String(key)] = value
       normalized.byIndex[String(key)] = value
@@ -69,17 +64,52 @@ const normalizeAnswers = (answers) => {
   return normalized
 }
 
-const normalizeText = (value) => String(value ?? "").trim().toLowerCase()
+const buildFallbackExplanation = (question) => {
+  if (question?.explanation && String(question.explanation).trim()) {
+    return String(question.explanation).trim()
+  }
+
+  const answer = String(question?.correct_answer ?? "").trim()
+  if (!answer) {
+    return `This question is marked correct for ${question?.section ?? "this section"}.`
+  }
+
+  return `The correct answer is "${answer}" because it matches the main idea in the question.`
+}
+
+const generateReviewExplanation = async (question, submitted, isCorrect) => {
+  try {
+    const explanation = await generateAnswerExplanation({
+      question: question.question ?? question.question_text ?? "",
+      options: Array.isArray(question.options) ? question.options : [],
+      correct_answer: question.correct_answer,
+      selected_answer: submitted ?? null,
+      section: question.section ?? null,
+      is_correct: isCorrect,
+    })
+
+    if (explanation && String(explanation).trim()) {
+      return String(explanation).trim()
+    }
+  } catch {
+    // Fall through to the deterministic fallback below.
+  }
+
+  return buildFallbackExplanation(question)
+}
 
 export const submitTest = async (req, res) => {
   try {
-    const { test_id, user_id, answers } = req.body
+    const { test_id, answers } = req.body
+    const user_id = req.user?.id
     const debug = req.query?.debug === "true"
 
-    if (!test_id || !user_id) {
-      return res.status(400).json({
-        error: "test_id and user_id are required",
-      })
+    if (!user_id) {
+      return res.status(401).json({ error: "Not authenticated" })
+    }
+
+    if (!test_id) {
+      return res.status(400).json({ error: "test_id is required" })
     }
 
     const { data: test, error: testError } = await supabase
@@ -114,39 +144,46 @@ export const submitTest = async (req, res) => {
       .from("questions")
       .select("*")
       .eq("test_id", test_id)
+      .order("id", { ascending: true })
 
     if (qError) {
       return res.status(500).json({ error: qError.message })
     }
 
-    let score = 0
     const submittedAnswers = normalizeAnswers(answers)
     const debugDetails = []
 
-    questions.forEach((q, idx) => {
-      const submitted = submittedAnswers.byId[String(q.id)]
-        ?? submittedAnswers.byQuestion[normalizeText(q.question)]
-        ?? submittedAnswers.byIndex[String(idx)]
+    const review = await Promise.all((questions || []).map(async (question, idx) => {
+      const submitted =
+        submittedAnswers.byId[String(question.id)] ??
+        submittedAnswers.byQuestion[normalizeText(question.question)] ??
+        submittedAnswers.byQuestion[normalizeText(question.question_text)] ??
+        submittedAnswers.byIndex[String(idx)]
 
-      const isCorrect = normalizeText(submitted) === normalizeText(q.correct_answer)
+      const isCorrect = normalizeText(submitted) === normalizeText(question.correct_answer)
+      const explanation = await generateReviewExplanation(question, submitted, isCorrect)
 
-      if (isCorrect) {
-        score++
+      debugDetails.push({
+        question_id: question.id,
+        submitted,
+        correct_answer: question.correct_answer,
+        is_correct: isCorrect,
+      })
+
+      return {
+        question_id: question.id,
+        section: question.section ?? null,
+        question: question.question ?? question.question_text ?? "",
+        options: Array.isArray(question.options) ? question.options : [],
+        selected_answer: submitted ?? null,
+        correct_answer: question.correct_answer,
+        is_correct: isCorrect,
+        explanation,
       }
+    }))
 
-      if (debug) {
-        debugDetails.push({
-          question_id: q.id,
-          submitted,
-          correct_answer: q.correct_answer,
-          is_correct: isCorrect
-        })
-      }
-
-      
-    })
-
-    const total = questions.length
+    const score = review.filter((item) => item.is_correct).length
+    const total = questions?.length || 0
     const percentage = total > 0 ? (score / total) * 100 : 0
 
     const { error: resultInsertError } = await supabase.from("results").insert([{
@@ -154,7 +191,7 @@ export const submitTest = async (req, res) => {
       user_id,
       score,
       total,
-      percentage
+      percentage,
     }])
 
     if (resultInsertError) {
@@ -165,18 +202,18 @@ export const submitTest = async (req, res) => {
       .from("tests")
       .update({ is_submitted: true })
       .eq("id", test_id)
+      .eq("user_id", user_id)
 
     if (testUpdateError) {
       return res.status(500).json({ error: testUpdateError.message })
     }
 
     const responseBody = {
-      message: isExpired
-        ? "Time expired. Auto submitted."
-        : "Submitted successfully",
+      message: isExpired ? "Time expired. Auto submitted." : "Submitted successfully",
       score,
       total,
-      percentage
+      percentage,
+      review,
     }
 
     if (debug) {
@@ -187,14 +224,13 @@ export const submitTest = async (req, res) => {
         parsed_start_utc: Number.isFinite(parsedStartTime) ? new Date(parsedStartTime).toISOString() : null,
         parsed_end_utc: Number.isFinite(endTime) ? new Date(endTime).toISOString() : null,
         is_expired: isExpired,
-        answer_match_count: debugDetails.filter(item => item.is_correct).length,
-        answer_details: debugDetails
+        answer_match_count: debugDetails.filter((item) => item.is_correct).length,
+        answer_details: debugDetails,
       }
     }
 
-    res.json(responseBody)
-
+    return res.json(responseBody)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    return res.status(500).json({ error: error.message })
   }
 }

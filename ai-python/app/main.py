@@ -1,4 +1,5 @@
 from fastapi import FastAPI,APIRouter, UploadFile, File ,HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
 from piper import PiperVoice, SynthesisConfig
@@ -36,12 +37,22 @@ syn_config = SynthesisConfig(
 )
 
 os.makedirs("audio", exist_ok=True)
+app.mount("/audio", StaticFiles(directory="audio"), name="audio")
  
 #ishimishi
 class MockTestRequest(BaseModel):
     role: str
     experience: str
     difficulty: str
+
+
+class AnswerExplanationRequest(BaseModel):
+    question: str
+    options: List[str]
+    correct_answer: str
+    selected_answer: Optional[str] = None
+    section: Optional[str] = None
+    is_correct: Optional[bool] = None
 
 def build_mock_test_prompt(role: str, experience: str, difficulty: str):
     return f"""
@@ -85,6 +96,38 @@ For each question:
 - Then generate 4 options including the correct one.
 - Ensure correct_answer exactly matches one option.
 - Double check logic before returning JSON.
+"""
+
+
+def build_answer_explanation_prompt(question: str, options: List[str], correct_answer: str, selected_answer: Optional[str], section: Optional[str], is_correct: Optional[bool]):
+    selected_text = selected_answer or "Not answered"
+    correctness_text = "correct" if is_correct else "incorrect"
+
+    return f"""
+You are an expert tutor explaining a multiple-choice question to a student.
+
+Explain the answer in plain, easy-to-understand language.
+Make the explanation specific to this exact question.
+Keep it short and useful.
+
+Section: {section or "General"}
+Question: {question}
+Options: {json.dumps(options)}
+Student answer: {selected_text}
+Correct answer: {correct_answer}
+Result: {correctness_text}
+
+Rules:
+- Write 1 to 2 short sentences only.
+- Keep it around 1 to 2 lines max.
+- Focus only on the key reason the answer is right.
+- If the student answer is wrong, mention the main mistake briefly.
+- If the student answer is correct, reinforce the core logic briefly.
+- Do not use markdown or bullet points.
+- Do not mention that you are an AI.
+- Keep the explanation focused and beginner-friendly.
+
+Return only the explanation text.
 """
 
 #tejapeja
@@ -133,6 +176,7 @@ def build_evaluation_prompt(role, experience, skills, conversation):
     formatted_answers = "\n\n".join(
         [f"Answer {i+1}:\n{ans}" for i, ans in enumerate(user_answers)]
     )
+    print("Formatted Answers for Evaluation Prompt:", formatted_answers)  # Debug log
 
     return f"""
 You are a senior technical interviewer.
@@ -204,7 +248,7 @@ def generate_question(data: dict):
 
     # 🧠 Ask Gemini
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemma-3-27b-it",
         contents=prompt,
     )
     question_text = response.text.strip()
@@ -253,7 +297,8 @@ def evaluate_interview(data: dict):
 
     if not conversation:
         return {"error": "Conversation history required"}
-
+    
+    print("Received conversation for evaluation:", conversation)  # Debug log
     prompt = build_evaluation_prompt(
         role,
         experience,
@@ -261,14 +306,9 @@ def evaluate_interview(data: dict):
         conversation
     )
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemma-3-27b-it",
             contents=prompt,
         )
 
@@ -323,6 +363,34 @@ def generate_mock_test(data: MockTestRequest):
         }
 
     return {"questions": questions}
+
+
+@app.post("/generate-answer-explanation")
+def generate_answer_explanation(data: AnswerExplanationRequest):
+    prompt = build_answer_explanation_prompt(
+        data.question,
+        data.options,
+        data.correct_answer,
+        data.selected_answer,
+        data.section,
+        data.is_correct,
+    )
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+
+        explanation = (response.text or "").strip()
+        if not explanation:
+            return {
+                "explanation": f"The correct answer is {data.correct_answer}. It fits the key idea in the question better than the other options."
+            }
+
+        return {"explanation": explanation}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def home():
