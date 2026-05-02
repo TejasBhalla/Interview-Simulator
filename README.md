@@ -6,6 +6,8 @@ InterviewSimulator is a full-stack interview practice platform that combines AI,
 - A Node.js + Express backend that handles authentication, database access, and API orchestration.
 - A FastAPI Python service that generates AI-driven interview questions, mock tests, audio, and explanations.
 
+The platform now includes an interactive 3D AI interviewer avatar that speaks questions and responds in real-time using voice and lip-sync animation.
+
 The app is designed to help users practice mock interviews, take aptitude tests, track coding progress, and review their history in one place.
 
 ---
@@ -18,6 +20,7 @@ The app is designed to help users practice mock interviews, take aptitude tests,
 - React 19 → 🧩 Component-based UI development  
 - TypeScript → 🔒 Adds type safety and scalability  
 - Tailwind CSS v4 → 🎨 Utility-first styling for rapid UI building  
+- Three.js + React Three Fiber → 🧍 3D avatar rendering
 - Framer Motion → 🎬 Smooth animations and transitions  
 - GSAP → 🎥 Advanced high-performance animations  
 - Zustand → 🧠 Lightweight global state management  
@@ -44,6 +47,7 @@ The app is designed to help users practice mock interviews, take aptitude tests,
 - Google Gemini API → 🧠 Generates AI interview questions and explanations  
 - Whisper → 🎙️ Converts speech to text  
 - Piper TTS → 🔊 Converts text to speech  
+- Rhubarb Lip Sync → 👄 Audio → viseme mapping
 - Uvicorn → 🚀 Runs FastAPI efficiently  
 
 ---
@@ -140,6 +144,8 @@ uvicorn app.main:app --reload --port 8000
 - 🤖 AI-powered interview question generation using Gemini  
 - 🎙️ Voice-first interview flow with speech-to-text and evaluation  
 - ⏱️ Timed aptitude tests with automatic scoring  
+- 🧍 3D avatar interviewer with real-time lip-sync animation
+- 👄 Lip-sync powered by Rhubarb (audio → viseme → morph targets)
 - 💻 Coding progress tracker with persistent checklist state  
 - 📊 Profile dashboard with interview history and performance stats  
 - 📚 Curated resources and guided practice pages  
